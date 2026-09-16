@@ -835,6 +835,126 @@ function AdministrativoView({ session }) {
   );
 }
 
+/* ============ BODEGA · confirmar recepción ============ */
+const fechaAgenda = (at) => {
+  const d = new Date(at);
+  return d.toLocaleDateString("es-CL", { weekday: "short", day: "2-digit", month: "2-digit" }) + " · " + d.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" });
+};
+
+function RecepcionModal({ sol, session, onClose }) {
+  const [confirmando, setConfirmando] = useState(false);
+  const [guardando, setGuardando] = useState(false);
+  const [err, setErr] = useState("");
+  const at = sol.recepcionProgramada?.at;
+
+  const recepcionar = async () => {
+    setGuardando(true); setErr("");
+    try {
+      const por = { pin: session.pin, nombre: session.nombre };
+      await updateDoc(doc(colSol, sol.id), {
+        estado: "RECEPCIONADA",
+        recepcion: { at: Date.now(), por },
+        historial: arrayUnion({ accion: "recepcionada", por, at: Date.now() }),
+      });
+      onClose();
+    } catch (e) { setGuardando(false); setErr("No se pudo confirmar: " + (e?.message || e)); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-3" style={{ background: "#000000aa" }}>
+      <div className="mt-10 w-full max-w-md rounded-2xl p-5" style={{ background: C.surface, border: `1px solid ${C.gold}55` }}>
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-base font-bold" style={{ color: C.gold }}><Hash size={18} /> OC {sol.ocNumero || "—"}</div>
+          <button onClick={onClose} className="rounded-lg p-1.5" style={{ color: C.muted, cursor: "pointer" }}><X size={18} /></button>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 rounded-xl px-3 py-2.5" style={{ background: C.surface2 }}>
+            <Building2 size={16} color={C.faint} />
+            <div><div className="text-xs" style={{ color: C.faint }}>Proveedor</div><div className="text-sm font-semibold" style={{ color: C.text }}>{sol.proveedor || "—"}</div></div>
+          </div>
+          <div className="flex items-center gap-2 rounded-xl px-3 py-2.5" style={{ background: C.surface2 }}>
+            <CalendarClock size={16} color={C.faint} />
+            <div><div className="text-xs" style={{ color: C.faint }}>Fecha / hora programada</div><div className="text-sm font-semibold" style={{ color: C.text }}>{at ? fechaAgenda(at) : "—"}</div></div>
+          </div>
+          <div className="text-xs" style={{ color: C.faint }}>La OC se verifica en el ERP. Aquí solo confirmas la recepción.</div>
+        </div>
+
+        {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
+
+        {!confirmando ? (
+          <div className="mt-5"><Btn full onClick={() => setConfirmando(true)}><PackageCheck size={18} /> RECEPCIONADO</Btn></div>
+        ) : (
+          <div className="mt-5 rounded-xl p-3" style={{ background: C.teal + "14", border: `1px solid ${C.teal}55` }}>
+            <div className="mb-3 text-center text-sm font-semibold" style={{ color: C.text }}>¿Confirmar recepción de la OC {sol.ocNumero}?</div>
+            <div className="flex gap-2">
+              <Btn full onClick={() => setConfirmando(false)} bg={C.surface2} fg={C.text} style={{ border: `1px solid ${C.line}` }}>Cancelar</Btn>
+              <Btn full onClick={recepcionar} disabled={guardando} bg={C.teal} fg="#0d1a12"><Check size={16} /> {guardando ? "Guardando…" : "Confirmar"}</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============ BODEGA · agenda de recepciones ============ */
+function BodegaView({ session }) {
+  const [sols, setSols] = useState([]);
+  const [abierta, setAbierta] = useState(null);
+  useEffect(() => onSnapshot(colSol, (s) => setSols(s.docs.map((d) => ({ id: d.id, ...d.data() })))), []);
+
+  const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0);
+  const ini = hoy0.getTime(); const fin = ini + 86400000;
+
+  const grupos = useMemo(() => {
+    const pend = sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" && s.recepcionProgramada?.at)
+      .sort((a, b) => a.recepcionProgramada.at - b.recepcionProgramada.at);
+    return {
+      atrasadas: pend.filter((s) => s.recepcionProgramada.at < ini),
+      hoy: pend.filter((s) => s.recepcionProgramada.at >= ini && s.recepcionProgramada.at < fin),
+      proximas: pend.filter((s) => s.recepcionProgramada.at >= fin),
+    };
+  }, [sols, ini, fin]);
+  const recepHoy = useMemo(() => sols.filter((s) => s.estado === "RECEPCIONADA" && ms(s.recepcion?.at) >= ini && ms(s.recepcion?.at) < fin).length, [sols, ini, fin]);
+
+  const Registro = ({ s, color }) => (
+    <button onClick={() => setAbierta(s)} className="w-full text-left" style={{ cursor: "pointer" }}>
+      <div className="flex items-center justify-between gap-3 rounded-xl px-4 py-3" style={{ background: C.surface, border: `1px solid ${C.line}`, borderLeft: `4px solid ${color}` }}>
+        <div>
+          <div className="flex items-center gap-2 text-sm font-bold" style={{ color: C.text }}><Hash size={14} color={color} />OC {s.ocNumero || "—"}</div>
+          <div className="mt-0.5 text-xs" style={{ color: C.muted }}>{s.proveedor || "—"} · {fechaAgenda(s.recepcionProgramada.at)}</div>
+        </div>
+        <div className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold" style={{ background: color + "1c", color }}><PackageCheck size={13} /> Recepcionar</div>
+      </div>
+    </button>
+  );
+
+  const Seccion = ({ titulo, Icono, color, items }) => (
+    <div>
+      <div className="mb-2 flex items-center gap-2 text-sm font-bold" style={{ color }}>
+        <Icono size={16} /> {titulo} <span className="rounded-full px-2 text-xs" style={{ background: color + "22" }}>{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <div className="rounded-xl px-4 py-3 text-xs" style={{ background: C.surface, border: `1px solid ${C.line}`, color: C.faint }}>Sin recepciones.</div>
+      ) : (
+        <div className="flex flex-col gap-2">{items.map((s) => <Registro key={s.id} s={s} color={color} />)}</div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center gap-2 text-base font-bold" style={{ color: C.gold }}><CalendarClock size={18} /> Agenda de recepciones</div>
+      <Seccion titulo="ATRASADAS" Icono={AlertTriangle} color={C.clay} items={grupos.atrasadas} />
+      <Seccion titulo="HOY" Icono={Clock} color={C.gold} items={grupos.hoy} />
+      <Seccion titulo="PRÓXIMAS" Icono={CalendarClock} color={C.info} items={grupos.proximas} />
+      {recepHoy > 0 && <div className="flex items-center gap-1.5 text-xs" style={{ color: C.teal }}><PackageCheck size={13} /> {recepHoy} recepcionada(s) hoy</div>}
+      {abierta && <RecepcionModal sol={sols.find((s) => s.id === abierta.id) || abierta} session={session} onClose={() => setAbierta(null)} />}
+    </div>
+  );
+}
+
 /* ============ Placeholder por rol ============ */
 function EnConstruccion({ titulo, etapa, desc, Icono }) {
   return (
@@ -880,7 +1000,7 @@ export default function App() {
       {session.rol === "admin" && <AdminView miPin={session.pin} />}
       {session.rol === "analista_compras" && <AnalistaView session={session} />}
       {session.rol === "administrativo_compras" && <AdministrativoView session={session} />}
-      {session.rol === "bodeguero" && <EnConstruccion Icono={Truck} titulo="Agenda de recepciones" etapa="5" desc="Atrasadas · Hoy · Próximas. Abrir una recepción y confirmar (estado RECEPCIONADA + fecha/hora real + usuario). Sin pedir productos ni cantidades." />}
+      {session.rol === "bodeguero" && <BodegaView session={session} />}
     </>
   );
 }
