@@ -9,6 +9,7 @@ import {
   KeyRound, AlertTriangle, LogOut, Users, Trash2, ShoppingCart, ClipboardList,
   Truck, FileCheck2, Shield, PackageCheck, Upload, Download, Send, Plus, X, Save,
   FileSpreadsheet, FileText, Check, ChevronLeft, Paperclip, Search, Image as ImageIcon, ScanLine,
+  CalendarClock, Hash, Clock, Building2, Inbox,
 } from "lucide-react";
 
 /* ============ Firestore refs (colecciones aisladas compras_) ============ */
@@ -679,6 +680,161 @@ function AnalistaView({ session }) {
   );
 }
 
+/* ============ tabla de ítems (solo lectura) ============ */
+function ItemsTabla({ items }) {
+  return (
+    <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${C.line}` }}>
+      <table className="w-full text-sm" style={{ minWidth: 640 }}>
+        <thead><tr style={{ background: C.surface2, color: C.faint }}>
+          <th className="px-2 py-2 text-left text-xs">Producto</th><th className="px-2 py-2 text-left text-xs">Cant.</th>
+          <th className="px-2 py-2 text-left text-xs">Unidad</th><th className="px-2 py-2 text-left text-xs">Proveedor</th>
+          <th className="px-2 py-2 text-left text-xs">Fecha req.</th><th className="px-2 py-2 text-left text-xs">Obs.</th>
+        </tr></thead>
+        <tbody>{(items || []).map((it, i) => (
+          <tr key={i} style={{ borderTop: `1px solid ${C.line}` }}>
+            <td className="px-2 py-1.5" style={{ color: C.text }}>{it.producto}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.cantidad}</td>
+            <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.unidad}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.proveedor}</td>
+            <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.fechaRequerida}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.observaciones}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ============ ADMINISTRATIVO · detalle (registrar OC + programar recepción) ============ */
+function AdminDetalle({ sol, session, onClose }) {
+  const [proveedor, setProveedor] = useState(sol.proveedor || (sol.items || []).map((i) => i.proveedor).find(Boolean) || "");
+  const [oc, setOc] = useState(sol.ocNumero || "");
+  const [fecha, setFecha] = useState(sol.recepcionProgramada?.fecha || "");
+  const [hora, setHora] = useState(sol.recepcionProgramada?.hora || "");
+  const [err, setErr] = useState(""); const [guardando, setGuardando] = useState(false);
+  const por = { pin: session.pin, nombre: session.nombre };
+  const yaProgramada = sol.estado === "PENDIENTE_RECEPCION" || sol.estado === "OC_GENERADA";
+  const esImg = (sol.archivo?.tipo || "").startsWith("image/");
+
+  const registrar = async () => {
+    if (!oc.trim()) return setErr("Ingresa el N° de OC generado en el ERP.");
+    if (!proveedor.trim()) return setErr("Ingresa el proveedor (aparece en la agenda de bodega).");
+    if (!fecha) return setErr("Selecciona la fecha de recepción.");
+    if (!hora) return setErr("Selecciona la hora de recepción.");
+    const at = new Date(`${fecha}T${hora}`).getTime();
+    if (!at || isNaN(at)) return setErr("Fecha u hora inválida.");
+    setGuardando(true); setErr("");
+    try {
+      await updateDoc(doc(colSol, sol.id), {
+        estado: "PENDIENTE_RECEPCION",
+        ocNumero: oc.trim(),
+        proveedor: proveedor.trim(),
+        recepcionProgramada: { fecha, hora, at },
+        historial: arrayUnion({ accion: yaProgramada ? "reprogramada" : "oc_registrada", por, at: Date.now(), detalle: `OC ${oc.trim()} · recepción ${fecha} ${hora}` }),
+      });
+      onClose();
+    } catch (e) { setGuardando(false); setErr("No se pudo guardar: " + (e?.message || e)); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-3" style={{ background: "#000000aa" }}>
+      <div className="mt-6 w-full max-w-3xl rounded-2xl p-4" style={{ background: C.surface, border: `1px solid ${C.line}` }}>
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>Solicitud #{sol.folio} <Badge estado={sol.estado} /></div>
+          <button onClick={onClose} className="rounded-lg p-1.5" style={{ color: C.muted, cursor: "pointer" }}><X size={16} /></button>
+        </div>
+        <div className="mb-3 text-xs" style={{ color: C.faint }}>Enviada por {sol.creadoPor?.nombre} · {fechaHora(sol.creadoAt)}{sol.origen === "imagen" ? " · desde imagen (OCR)" : ""}</div>
+
+        {sol.archivo?.data ? (
+          <div className="mb-3 flex flex-col gap-2">
+            {esImg && <div className="overflow-hidden rounded-xl" style={{ border: `1px solid ${C.line}`, maxHeight: 200 }}><img src={`data:${sol.archivo.tipo};base64,${sol.archivo.data}`} alt="original" style={{ width: "100%", objectFit: "contain", maxHeight: 200 }} /></div>}
+            <button onClick={() => descargarArchivo(sol.archivo)} className="inline-flex w-fit items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info, cursor: "pointer" }}>
+              <Download size={13} /> Descargar original ({sol.archivo.nombre})
+            </button>
+          </div>
+        ) : <div className="mb-3 text-xs" style={{ color: C.faint }}>Sin archivo original adjunto.</div>}
+
+        <div className="mb-3"><ItemsTabla items={sol.items} /></div>
+        {sol.observaciones && <div className="mb-3 text-xs" style={{ color: C.muted }}>Obs.: {sol.observaciones}</div>}
+
+        <div className="rounded-xl p-3" style={{ background: C.surface2, border: `1px solid ${C.gold}44` }}>
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold" style={{ color: C.gold }}><FileCheck2 size={15} /> Registrar OC y programar recepción</div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>N° de OC (del ERP)
+              <div className="flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                <Hash size={14} color={C.faint} /><input value={oc} onChange={(e) => setOc(e.target.value)} placeholder="Ej: 4587" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} /></div>
+            </label>
+            <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Proveedor
+              <div className="flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                <Building2 size={14} color={C.faint} /><input value={proveedor} onChange={(e) => setProveedor(e.target.value)} placeholder="Proveedor de la OC" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} /></div>
+            </label>
+            <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Fecha de recepción
+              <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+            </label>
+            <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Hora de recepción
+              <input type="time" value={hora} onChange={(e) => setHora(e.target.value)} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+            </label>
+          </div>
+          {err && <div className="mt-2 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
+          <div className="mt-3 flex justify-end">
+            <Btn onClick={registrar} disabled={guardando}><Send size={15} /> {guardando ? "Guardando…" : yaProgramada ? "Actualizar y reenviar a bodega" : "Registrar OC y enviar a bodega"}</Btn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ ADMINISTRATIVO ============ */
+function AdministrativoView({ session }) {
+  const [tab, setTab] = useState("pendientes");
+  const [sols, setSols] = useState([]);
+  const [q, setQ] = useState("");
+  const [abierta, setAbierta] = useState(null);
+  useEffect(() => onSnapshot(colSol, (s) => setSols(s.docs.map((d) => ({ id: d.id, ...d.data() })))), []);
+
+  const pendientes = useMemo(() => sols.filter((s) => s.estado === "ENVIADA").sort((a, b) => ms(a.creadoAt) - ms(b.creadoAt)), [sols]);
+  const programadas = useMemo(() => sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" || s.estado === "OC_GENERADA").sort((a, b) => ms(a.recepcionProgramada?.at) - ms(b.recepcionProgramada?.at)), [sols]);
+  const filtrar = (arr) => arr.filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q))));
+  const lista = tab === "pendientes" ? filtrar(pendientes) : filtrar(programadas);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="mb-3 flex items-center gap-3 text-xs">
+        <span style={{ color: C.info }}>{pendientes.length} pendiente(s)</span>
+        <span style={{ color: C.gold }}>{programadas.length} programada(s)</span>
+      </div>
+      <Tabs value={tab} onChange={setTab} items={[["pendientes", "Pendientes", Inbox], ["programadas", "Programadas", CalendarClock]]} />
+
+      <div className="mb-3 flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: C.surface, border: `1px solid ${C.line}` }}>
+        <Search size={15} color={C.faint} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar por folio, producto, proveedor u OC" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} />
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {lista.length === 0 && <Card><div className="text-center text-sm" style={{ color: C.faint }}>{tab === "pendientes" ? "No hay solicitudes pendientes por procesar." : "No hay recepciones programadas."}</div></Card>}
+        {lista.map((s) => {
+          const nItems = (s.items || []).length;
+          return (
+            <button key={s.id} onClick={() => setAbierta(s)} className="text-left" style={{ cursor: "pointer" }}>
+              <Card>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>#{s.folio} <Badge estado={s.estado} />{s.origen === "imagen" && <ImageIcon size={12} color={C.faint} />}</div>
+                    <div className="mt-0.5 text-xs" style={{ color: C.faint }}>
+                      {nItems} ítem(s){s.proveedor ? ` · ${s.proveedor}` : ""} · de {s.creadoPor?.nombre}
+                      {tab === "programadas" && s.recepcionProgramada?.at ? ` · recep. ${fechaHora(s.recepcionProgramada.at)} · OC ${s.ocNumero}` : ""}
+                    </div>
+                  </div>
+                  <div className="text-xs" style={{ color: C.faint }}>{tab === "pendientes" ? "Procesar →" : "Editar →"}</div>
+                </div>
+              </Card>
+            </button>
+          );
+        })}
+      </div>
+      {abierta && <AdminDetalle sol={sols.find((s) => s.id === abierta.id) || abierta} session={session} onClose={() => setAbierta(null)} />}
+    </div>
+  );
+}
+
 /* ============ Placeholder por rol ============ */
 function EnConstruccion({ titulo, etapa, desc, Icono }) {
   return (
@@ -723,7 +879,7 @@ export default function App() {
 
       {session.rol === "admin" && <AdminView miPin={session.pin} />}
       {session.rol === "analista_compras" && <AnalistaView session={session} />}
-      {session.rol === "administrativo_compras" && <EnConstruccion Icono={FileCheck2} titulo="Solicitudes pendientes" etapa="4" desc="Ver solicitudes enviadas por el analista, descargar el original, registrar el N° de OC del ERP y programar fecha/hora de recepción hacia la agenda de bodega." />}
+      {session.rol === "administrativo_compras" && <AdministrativoView session={session} />}
       {session.rol === "bodeguero" && <EnConstruccion Icono={Truck} titulo="Agenda de recepciones" etapa="5" desc="Atrasadas · Hoy · Próximas. Abrir una recepción y confirmar (estado RECEPCIONADA + fecha/hora real + usuario). Sin pedir productos ni cantidades." />}
     </>
   );
