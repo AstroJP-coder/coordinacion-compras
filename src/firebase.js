@@ -1,9 +1,10 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage";
 
 // MISMO proyecto Firebase que las demás apps (costeador-de-recetas).
 // No se crea proyecto nuevo. Config pública de cliente web.
+// Nota: Storage no se usa (el proyecto está en plan Spark). El archivo original
+// de cada solicitud se guarda embebido en el propio documento de Firestore.
 const firebaseConfig = {
   apiKey: "AIzaSyCxb-8_XSZfl7BEtClFzp7C8pN4427G-DQ",
   authDomain: "costeador-de-recetas.firebaseapp.com",
@@ -15,4 +16,3 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
-export const storage = getStorage(app);

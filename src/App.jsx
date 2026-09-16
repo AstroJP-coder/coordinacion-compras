@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { db, storage } from "./firebase";
+import { db } from "./firebase";
 import {
   collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, onSnapshot, serverTimestamp, arrayUnion,
 } from "firebase/firestore";
-import { ref as sref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import * as XLSX from "xlsx";
 import {
   KeyRound, AlertTriangle, LogOut, Users, Trash2, ShoppingCart, ClipboardList,
@@ -46,8 +45,25 @@ const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0
 const ms = (t) => (t == null ? 0 : typeof t === "number" ? t : typeof t.toMillis === "function" ? t.toMillis() : t.seconds ? t.seconds * 1000 : 0);
 const fecha = (ts) => { const n = ms(ts); return n ? new Date(n).toLocaleDateString("es-CL", { day: "2-digit", month: "2-digit", year: "2-digit" }) : ""; };
 const fechaHora = (ts) => { const n = ms(ts); return n ? new Date(n).toLocaleString("es-CL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""; };
-const safeName = (n) => String(n || "archivo").replace(/[^\w.\-]+/g, "_").slice(-80);
 const cellToStr = (v) => { if (v == null) return ""; if (v instanceof Date) return v.toISOString().slice(0, 10); return String(v).trim(); };
+
+// Firestore topa en ~1 MB por documento; el original se guarda embebido en base64
+// (infla ~33%). Limitamos el archivo original a 700 KB para dejar margen a los ítems.
+const MAX_ARCHIVO = 700 * 1024;
+const kb = (n) => `${Math.round(n / 1024)} KB`;
+const fileToB64 = (file) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(",")[1] || "");
+  r.onerror = () => rej(new Error("No se pudo leer el archivo"));
+  r.readAsDataURL(file);
+});
+const descargarArchivo = (a) => {
+  if (!a?.data) return;
+  const link = document.createElement("a");
+  link.href = `data:${a.tipo || "application/octet-stream"};base64,${a.data}`;
+  link.download = a.nombre || "original";
+  document.body.appendChild(link); link.click(); link.remove();
+};
 
 const ITEM_VACIO = { producto: "", cantidad: "", unidad: "", proveedor: "", fechaRequerida: "", observaciones: "" };
 const FIELD_DEFS = [
@@ -298,6 +314,7 @@ function NuevaSolicitud({ session, onListo }) {
   const [hdr, setHdr] = useState({ proveedor: "", fechaRequerida: "", observaciones: "" });
   const [err, setErr] = useState(""); const [aviso, setAviso] = useState(""); const [guardando, setGuardando] = useState(false);
   const fileRef = useRef(null);
+  const archivoGrande = file && file.size > MAX_ARCHIVO;
 
   const cargarArchivo = async (f) => {
     setErr(""); setAviso(""); if (!f) return;
@@ -327,32 +344,35 @@ function NuevaSolicitud({ session, onListo }) {
     if (!validos.length) return setErr("Necesitas al menos un ítem con producto.");
     setGuardando(true); setErr(""); setAviso("");
     try {
-      const nueva = doc(colSol);
-      let archivo = null, archivoFallo = false;
-      if (file) {
-        try {
-          const path = `compras_archivos/${nueva.id}/${Date.now()}_${safeName(file.name)}`;
-          const r = sref(storage, path);
-          await uploadBytes(r, file);
-          const url = await getDownloadURL(r);
-          archivo = { nombre: file.name, path, url, tipo: file.type || "", size: file.size };
-        } catch (e) { archivoFallo = true; }
-      }
+      // Original embebido en el propio documento (sin Storage). Se omite si supera el límite.
+      let archivo = null, archivoOmitido = false;
+      if (file && !archivoGrande) {
+        try { archivo = { nombre: file.name, tipo: file.type || "", size: file.size, data: await fileToB64(file) }; }
+        catch (e) { archivoOmitido = true; }
+      } else if (archivoGrande) archivoOmitido = true;
+
       const snap = await getDocs(colSol);
       const folio = snap.docs.reduce((mx, d) => Math.max(mx, Number(d.data().folio) || 0), 0) + 1;
       const por = { pin: session.pin, nombre: session.nombre };
       const estado = enviar ? "ENVIADA" : "BORRADOR";
       const historial = [{ accion: "creada", por, at: Date.now() }];
       if (enviar) historial.push({ accion: "enviada", por, at: Date.now() });
-      await setDoc(nueva, {
+      const base = {
         folio, estado,
         items: validos.map((it) => ({ ...it, cantidad: String(it.cantidad).trim() })),
         proveedor: hdr.proveedor.trim(), fechaRequerida: hdr.fechaRequerida.trim(), observaciones: hdr.observaciones.trim(),
-        archivo,
         ocNumero: "", recepcionProgramada: null, recepcion: null,
         creadoPor: por, creadoAt: serverTimestamp(), historial,
-      });
-      if (archivoFallo) { setAviso("Solicitud guardada, pero el archivo original no se pudo subir (revisa las reglas de Storage). Los ítems quedaron guardados."); setGuardando(false); setTimeout(() => onListo(), 1800); }
+      };
+      const nueva = doc(colSol);
+      try {
+        await setDoc(nueva, { ...base, archivo });
+      } catch (e2) {
+        // Si el documento supera 1 MB por el archivo embebido, reintenta sin él.
+        if (archivo) { await setDoc(nueva, { ...base, archivo: null }); archivoOmitido = true; }
+        else throw e2;
+      }
+      if (archivoOmitido) { setAviso("Solicitud guardada. El archivo original no se adjuntó por tamaño (máx. 700 KB embebido); los ítems quedaron guardados."); setGuardando(false); setTimeout(() => onListo(), 2200); }
       else onListo();
     } catch (e) { setGuardando(false); setErr("No se pudo guardar: " + (e?.message || e)); }
   };
@@ -403,7 +423,7 @@ function NuevaSolicitud({ session, onListo }) {
         <>
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}><ClipboardList size={16} color={C.gold} /> Revisar y confirmar</div>
           <div className="mb-3 flex items-center gap-1.5 text-xs" style={{ color: C.faint }}>
-            {file && <><Paperclip size={12} /> {file.name} (se guarda como original)</>}
+            {file && <><Paperclip size={12} /> {file.name} ({kb(file.size)}){archivoGrande ? " — supera 700 KB, no se adjuntará el original" : " · se guarda como original"}</>}
           </div>
           <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Proveedor (opcional, cabecera)" value={hdr.proveedor} onChange={(e) => setHdr({ ...hdr, proveedor: e.target.value })} placeholder="Si aplica a toda la solicitud" />
@@ -411,6 +431,7 @@ function NuevaSolicitud({ session, onListo }) {
             <Field label="Observaciones (opcional)" value={hdr.observaciones} onChange={(e) => setHdr({ ...hdr, observaciones: e.target.value })} placeholder="Nota general" />
           </div>
           <ItemsEditor items={items} setItems={setItems} />
+          {archivoGrande && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.amber }}><AlertTriangle size={13} /> El archivo pesa {kb(file.size)}. Se guardarán los ítems, pero el original no se adjuntará (límite 700 KB).</div>}
           {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
           {aviso && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.amber }}><AlertTriangle size={13} /> {aviso}</div>}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
@@ -451,7 +472,6 @@ function SolicitudDetalle({ sol, session, onClose }) {
   };
   const eliminar = async () => {
     if (!window.confirm("¿Eliminar este borrador? No se puede deshacer.")) return;
-    if (sol.archivo?.path) { try { await deleteObject(sref(storage, sol.archivo.path)); } catch (e) {} }
     await deleteDoc(doc(colSol, sol.id)); onClose();
   };
 
@@ -464,10 +484,10 @@ function SolicitudDetalle({ sol, session, onClose }) {
         </div>
         <div className="mb-3 text-xs" style={{ color: C.faint }}>Creada por {sol.creadoPor?.nombre} · {fechaHora(sol.creadoAt)}</div>
 
-        {sol.archivo ? (
-          <a href={sol.archivo.url} target="_blank" rel="noreferrer" className="mb-3 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info }}>
+        {sol.archivo?.data ? (
+          <button onClick={() => descargarArchivo(sol.archivo)} className="mb-3 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info, cursor: "pointer" }}>
             <Download size={13} /> Descargar original ({sol.archivo.nombre})
-          </a>
+          </button>
         ) : <div className="mb-3 text-xs" style={{ color: C.faint }}>Sin archivo original adjunto.</div>}
 
         {esBorrador ? (
