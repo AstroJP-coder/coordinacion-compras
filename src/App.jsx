@@ -4,10 +4,11 @@ import {
   collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, onSnapshot, serverTimestamp, arrayUnion,
 } from "firebase/firestore";
 import * as XLSX from "xlsx";
+import Tesseract from "tesseract.js";
 import {
   KeyRound, AlertTriangle, LogOut, Users, Trash2, ShoppingCart, ClipboardList,
   Truck, FileCheck2, Shield, PackageCheck, Upload, Download, Send, Plus, X, Save,
-  FileSpreadsheet, FileText, Check, ChevronLeft, Paperclip, Search,
+  FileSpreadsheet, FileText, Check, ChevronLeft, Paperclip, Search, Image as ImageIcon, ScanLine,
 } from "lucide-react";
 
 /* ============ Firestore refs (colecciones aisladas compras_) ============ */
@@ -64,6 +65,26 @@ const descargarArchivo = (a) => {
   link.download = a.nombre || "original";
   document.body.appendChild(link); link.click(); link.remove();
 };
+// Comprime/redimensiona una imagen en el navegador (canvas) para que quepa embebida.
+const comprimirImagen = (file, maxBytes = MAX_ARCHIVO) => new Promise((resolve) => {
+  const img = new window.Image();
+  const url = URL.createObjectURL(file);
+  img.onload = () => {
+    let { width, height } = img;
+    const MAXDIM = 1600;
+    if (Math.max(width, height) > MAXDIM) { const r = MAXDIM / Math.max(width, height); width = Math.round(width * r); height = Math.round(height * r); }
+    const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+    let q = 0.85, dataUrl = canvas.toDataURL("image/jpeg", q);
+    while (dataUrl.length * 0.75 > maxBytes && q > 0.3) { q -= 0.1; dataUrl = canvas.toDataURL("image/jpeg", q); }
+    URL.revokeObjectURL(url);
+    const b64 = dataUrl.split(",")[1] || "";
+    const size = Math.round(b64.length * 0.75);
+    resolve({ nombre: file.name.replace(/\.\w+$/, "") + ".jpg", tipo: "image/jpeg", size, data: b64, tooBig: size > maxBytes });
+  };
+  img.onerror = () => resolve(null);
+  img.src = url;
+});
 
 const ITEM_VACIO = { producto: "", cantidad: "", unidad: "", proveedor: "", fechaRequerida: "", observaciones: "" };
 const FIELD_DEFS = [
@@ -81,6 +102,17 @@ const guessField = (header) => {
   for (const f of FIELD_DEFS) if (f.syn.some((s) => h === norm(s))) return f.k;
   for (const f of FIELD_DEFS) if (f.syn.some((s) => h.includes(norm(s)))) return f.k;
   return "ignorar";
+};
+// Interpreta una línea de texto (OCR) en un ítem, detectando cantidad y unidad si están.
+const UNID = "x|und|un|u|uds?|cajas?|caja|kg|kgs|grs?|gr|lt|lts?|l|bidon(?:es)?|pack|docenas?|doc|bolsas?|sacos?|rollos?|pares?|latas?|botellas?";
+const parseLineaOCR = (linea) => {
+  const s = linea.trim().replace(/\s+/g, " ");
+  if (!s) return null;
+  let m = s.match(new RegExp(`^(\\d+(?:[.,]\\d+)?)\\s*(${UNID})?\\.?\\s*[x*·-]?\\s*(.+)$`, "i"));
+  if (m && m[3] && /[a-záéíóúñ]/i.test(m[3])) return { ...ITEM_VACIO, producto: m[3].trim(), cantidad: m[1], unidad: (m[2] || "").toLowerCase() };
+  m = s.match(new RegExp(`^(.+?)\\s+(\\d+(?:[.,]\\d+)?)\\s*(${UNID})?\\.?$`, "i"));
+  if (m && m[1] && /[a-záéíóúñ]/i.test(m[1])) return { ...ITEM_VACIO, producto: m[1].trim(), cantidad: m[2], unidad: (m[3] || "").toLowerCase() };
+  return { ...ITEM_VACIO, producto: s };
 };
 
 const parseXlsx = async (file) => {
@@ -295,7 +327,7 @@ function ItemsEditor({ items, setItems }) {
   );
 }
 
-/* ============ Nueva solicitud (Excel/TXT) ============ */
+/* ============ Nueva solicitud (Excel/TXT + Imagen/OCR) ============ */
 function plantilla() {
   const ws = XLSX.utils.json_to_sheet([
     { producto: "Detergente industrial 5L", cantidad: 10, unidad: "bidón", proveedor: "Distribuidora XYZ", fecha_requerida: "2026-09-30", observaciones: "" },
@@ -306,15 +338,24 @@ function plantilla() {
 }
 
 function NuevaSolicitud({ session, onListo }) {
-  const [step, setStep] = useState("upload"); // upload | map | review
+  const [step, setStep] = useState("upload"); // upload | map | ocr | review
+  const [origen, setOrigen] = useState("archivo"); // archivo | imagen
   const [file, setFile] = useState(null);
   const [parsed, setParsed] = useState({ headers: [], rows: [] });
   const [mapping, setMapping] = useState([]);
   const [items, setItems] = useState([]);
   const [hdr, setHdr] = useState({ proveedor: "", fechaRequerida: "", observaciones: "" });
   const [err, setErr] = useState(""); const [aviso, setAviso] = useState(""); const [guardando, setGuardando] = useState(false);
-  const fileRef = useRef(null);
-  const archivoGrande = file && file.size > MAX_ARCHIVO;
+  // imagen / OCR
+  const [imgPrev, setImgPrev] = useState("");       // objectURL para vista previa
+  const [imgEmbed, setImgEmbed] = useState(null);   // {nombre,tipo,size,data,tooBig} comprimido para guardar
+  const [ocrText, setOcrText] = useState("");
+  const [ocrProg, setOcrProg] = useState(0);
+  const [ocrRun, setOcrRun] = useState(false);
+  const fileRef = useRef(null); const imgRef = useRef(null);
+  const archivoGrande = origen === "archivo" && file && file.size > MAX_ARCHIVO;
+
+  const reset = () => { setFile(null); setParsed({ headers: [], rows: [] }); setMapping([]); setItems([]); setImgPrev(""); setImgEmbed(null); setOcrText(""); setOcrProg(0); setErr(""); setAviso(""); };
 
   const cargarArchivo = async (f) => {
     setErr(""); setAviso(""); if (!f) return;
@@ -323,10 +364,22 @@ function NuevaSolicitud({ session, onListo }) {
       let p;
       if (["xlsx", "xls", "xlsm", "csv"].includes(ext)) p = await parseXlsx(f);
       else if (["txt", "tsv"].includes(ext)) p = parseTxt(await f.text());
-      else return setErr("Formato no soportado en esta etapa. Usa Excel o TXT (las imágenes llegan en la Etapa 3).");
+      else return setErr("Formato no soportado. Usa Excel/TXT, o el botón de Imagen para OCR.");
       if (!p.headers.length || !p.rows.length) return setErr("No pude leer filas del archivo. Revisa que tenga encabezados y datos.");
-      setFile(f); setParsed(p); setMapping(p.headers.map((h) => guessField(h))); setStep("map");
+      setOrigen("archivo"); setFile(f); setParsed(p); setMapping(p.headers.map((h) => guessField(h))); setStep("map");
     } catch (e) { setErr("Error al leer el archivo: " + (e?.message || e)); }
+  };
+
+  const cargarImagen = async (f) => {
+    setErr(""); setAviso(""); if (!f) return;
+    if (!f.type.startsWith("image/")) return setErr("Selecciona una imagen (foto o recorte de pantalla).");
+    setOrigen("imagen"); setFile(f); setImgPrev(URL.createObjectURL(f)); setStep("ocr"); setOcrRun(true); setOcrProg(0); setOcrText("");
+    try {
+      const emb = await comprimirImagen(f); setImgEmbed(emb);
+      const { data } = await Tesseract.recognize(f, "spa", { logger: (m) => { if (m.status === "recognizing text") setOcrProg(Math.round(m.progress * 100)); } });
+      setOcrText((data?.text || "").trim());
+    } catch (e) { setErr("No se pudo procesar el OCR: " + (e?.message || e)); }
+    finally { setOcrRun(false); }
   };
 
   const aplicarMapeo = () => {
@@ -339,14 +392,22 @@ function NuevaSolicitud({ session, onListo }) {
     setItems(its); setErr(""); setStep("review");
   };
 
+  const interpretarOCR = () => {
+    const its = ocrText.split(/\r?\n/).map(parseLineaOCR).filter((it) => it && it.producto.trim());
+    if (!its.length) return setErr("No se detectaron líneas con productos. Edita el texto o agrega filas manualmente.");
+    setItems(its); setErr(""); setStep("review");
+  };
+
   const guardar = async (enviar) => {
     const validos = items.filter((it) => it.producto.trim());
     if (!validos.length) return setErr("Necesitas al menos un ítem con producto.");
     setGuardando(true); setErr(""); setAviso("");
     try {
-      // Original embebido en el propio documento (sin Storage). Se omite si supera el límite.
       let archivo = null, archivoOmitido = false;
-      if (file && !archivoGrande) {
+      if (origen === "imagen") {
+        if (imgEmbed && !imgEmbed.tooBig) archivo = { nombre: imgEmbed.nombre, tipo: imgEmbed.tipo, size: imgEmbed.size, data: imgEmbed.data };
+        else archivoOmitido = true;
+      } else if (file && !archivoGrande) {
         try { archivo = { nombre: file.name, tipo: file.type || "", size: file.size, data: await fileToB64(file) }; }
         catch (e) { archivoOmitido = true; }
       } else if (archivoGrande) archivoOmitido = true;
@@ -355,24 +416,20 @@ function NuevaSolicitud({ session, onListo }) {
       const folio = snap.docs.reduce((mx, d) => Math.max(mx, Number(d.data().folio) || 0), 0) + 1;
       const por = { pin: session.pin, nombre: session.nombre };
       const estado = enviar ? "ENVIADA" : "BORRADOR";
-      const historial = [{ accion: "creada", por, at: Date.now() }];
+      const historial = [{ accion: "creada", por, at: Date.now(), detalle: origen === "imagen" ? "OCR imagen" : "archivo" }];
       if (enviar) historial.push({ accion: "enviada", por, at: Date.now() });
       const base = {
         folio, estado,
         items: validos.map((it) => ({ ...it, cantidad: String(it.cantidad).trim() })),
         proveedor: hdr.proveedor.trim(), fechaRequerida: hdr.fechaRequerida.trim(), observaciones: hdr.observaciones.trim(),
-        ocNumero: "", recepcionProgramada: null, recepcion: null,
+        origen, ocNumero: "", recepcionProgramada: null, recepcion: null,
         creadoPor: por, creadoAt: serverTimestamp(), historial,
       };
       const nueva = doc(colSol);
-      try {
-        await setDoc(nueva, { ...base, archivo });
-      } catch (e2) {
-        // Si el documento supera 1 MB por el archivo embebido, reintenta sin él.
-        if (archivo) { await setDoc(nueva, { ...base, archivo: null }); archivoOmitido = true; }
-        else throw e2;
-      }
-      if (archivoOmitido) { setAviso("Solicitud guardada. El archivo original no se adjuntó por tamaño (máx. 700 KB embebido); los ítems quedaron guardados."); setGuardando(false); setTimeout(() => onListo(), 2200); }
+      try { await setDoc(nueva, { ...base, archivo }); }
+      catch (e2) { if (archivo) { await setDoc(nueva, { ...base, archivo: null }); archivoOmitido = true; } else throw e2; }
+
+      if (archivoOmitido) { setAviso("Solicitud guardada. El original no se adjuntó por tamaño (máx. 700 KB); los ítems quedaron guardados."); setGuardando(false); setTimeout(() => onListo(), 2200); }
       else onListo();
     } catch (e) { setGuardando(false); setErr("No se pudo guardar: " + (e?.message || e)); }
   };
@@ -382,10 +439,12 @@ function NuevaSolicitud({ session, onListo }) {
       {step === "upload" && (
         <>
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}><Upload size={16} color={C.gold} /> Nueva solicitud</div>
-          <div className="mb-4 text-xs" style={{ color: C.faint }}>Carga un Excel (.xlsx/.csv) o TXT. Interpreto las columnas, muestro previsualización y podrás corregir antes de guardar.</div>
+          <div className="mb-4 text-xs" style={{ color: C.faint }}>Carga un Excel/TXT, o una imagen (foto o recorte) para leerla con OCR. En todos los casos revisas y corriges antes de guardar.</div>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.xlsm,.csv,.txt,.tsv" className="hidden" onChange={(e) => cargarArchivo(e.target.files?.[0])} />
-            <Btn onClick={() => fileRef.current?.click()}><FileSpreadsheet size={15} /> Elegir archivo</Btn>
+            <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={(e) => cargarImagen(e.target.files?.[0])} />
+            <Btn onClick={() => fileRef.current?.click()}><FileSpreadsheet size={15} /> Excel / TXT</Btn>
+            <Btn onClick={() => imgRef.current?.click()} bg={C.info} fg={C.bg}><ImageIcon size={15} /> Imagen (OCR)</Btn>
             <Ghost onClick={plantilla} color={C.info}><Download size={13} /> Descargar plantilla</Ghost>
           </div>
           {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
@@ -395,7 +454,7 @@ function NuevaSolicitud({ session, onListo }) {
       {step === "map" && (
         <>
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}><FileText size={16} color={C.gold} /> Interpretar columnas</div>
-          <div className="mb-3 text-xs" style={{ color: C.faint }}>{file?.name} · {parsed.rows.length} fila(s). Asigna cada columna del archivo a un campo. Ajusté un mapeo automático; corrígelo si hace falta.</div>
+          <div className="mb-3 text-xs" style={{ color: C.faint }}>{file?.name} · {parsed.rows.length} fila(s). Asigna cada columna a un campo. Ajusté un mapeo automático; corrígelo si hace falta.</div>
           <div className="flex flex-col gap-2">
             {parsed.headers.map((h, i) => (
               <div key={i} className="grid grid-cols-1 items-center gap-2 rounded-xl px-3 py-2 sm:grid-cols-2" style={{ background: C.surface2 }}>
@@ -413,8 +472,35 @@ function NuevaSolicitud({ session, onListo }) {
           </div>
           {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
           <div className="mt-4 flex items-center justify-between">
-            <Ghost onClick={() => { setStep("upload"); setErr(""); }}><ChevronLeft size={13} /> Volver</Ghost>
+            <Ghost onClick={() => { reset(); setStep("upload"); }}><ChevronLeft size={13} /> Volver</Ghost>
             <Btn onClick={aplicarMapeo}>Previsualizar <Check size={15} /></Btn>
+          </div>
+        </>
+      )}
+
+      {step === "ocr" && (
+        <>
+          <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}><ScanLine size={16} color={C.gold} /> Texto detectado (OCR)</div>
+          <div className="mb-3 text-xs" style={{ color: C.faint }}>El OCR sobre fotos/recortes es aproximado. Revisa y corrige el texto; luego lo interpreto en filas para que ajustes cantidades y unidades.</div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {imgPrev && <div className="overflow-hidden rounded-xl" style={{ border: `1px solid ${C.line}`, maxHeight: 260 }}><img src={imgPrev} alt="original" style={{ width: "100%", objectFit: "contain", maxHeight: 260 }} /></div>}
+            <div>
+              {ocrRun ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 rounded-xl p-4 text-center" style={{ background: C.surface2 }}>
+                  <ScanLine size={20} color={C.gold} />
+                  <div className="text-sm" style={{ color: C.text }}>Procesando OCR… {ocrProg}%</div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: C.line }}><div style={{ width: `${ocrProg}%`, height: "100%", background: C.gold, transition: "width .2s" }} /></div>
+                  <div className="text-xs" style={{ color: C.faint }}>La primera vez descarga el motor (~unos MB).</div>
+                </div>
+              ) : (
+                <textarea value={ocrText} onChange={(e) => setOcrText(e.target.value)} rows={10} placeholder="Aquí aparece el texto detectado; edítalo si hace falta." className="w-full rounded-xl px-3 py-2 text-sm outline-none" style={{ background: C.surface2, border: `1px solid ${C.line}`, color: C.text, minHeight: 200 }} />
+              )}
+            </div>
+          </div>
+          {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
+          <div className="mt-4 flex items-center justify-between">
+            <Ghost onClick={() => { reset(); setStep("upload"); }}><ChevronLeft size={13} /> Volver</Ghost>
+            <Btn onClick={interpretarOCR} disabled={ocrRun || !ocrText.trim()}>Interpretar líneas <Check size={15} /></Btn>
           </div>
         </>
       )}
@@ -423,7 +509,9 @@ function NuevaSolicitud({ session, onListo }) {
         <>
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}><ClipboardList size={16} color={C.gold} /> Revisar y confirmar</div>
           <div className="mb-3 flex items-center gap-1.5 text-xs" style={{ color: C.faint }}>
-            {file && <><Paperclip size={12} /> {file.name} ({kb(file.size)}){archivoGrande ? " — supera 700 KB, no se adjuntará el original" : " · se guarda como original"}</>}
+            {origen === "imagen"
+              ? <><ImageIcon size={12} /> {file?.name} {imgEmbed && !imgEmbed.tooBig ? `(imagen ${kb(imgEmbed.size)}, se guarda)` : "(imagen muy grande, no se adjuntará)"}</>
+              : file && <><Paperclip size={12} /> {file.name} ({kb(file.size)}){archivoGrande ? " — supera 700 KB, no se adjuntará" : " · se guarda como original"}</>}
           </div>
           <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Proveedor (opcional, cabecera)" value={hdr.proveedor} onChange={(e) => setHdr({ ...hdr, proveedor: e.target.value })} placeholder="Si aplica a toda la solicitud" />
@@ -431,11 +519,10 @@ function NuevaSolicitud({ session, onListo }) {
             <Field label="Observaciones (opcional)" value={hdr.observaciones} onChange={(e) => setHdr({ ...hdr, observaciones: e.target.value })} placeholder="Nota general" />
           </div>
           <ItemsEditor items={items} setItems={setItems} />
-          {archivoGrande && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.amber }}><AlertTriangle size={13} /> El archivo pesa {kb(file.size)}. Se guardarán los ítems, pero el original no se adjuntará (límite 700 KB).</div>}
           {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
           {aviso && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.amber }}><AlertTriangle size={13} /> {aviso}</div>}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-            <Ghost onClick={() => { setStep("map"); setErr(""); }}><ChevronLeft size={13} /> Volver al mapeo</Ghost>
+            <Ghost onClick={() => setStep(origen === "imagen" ? "ocr" : "map")}><ChevronLeft size={13} /> Volver</Ghost>
             <div className="flex gap-2">
               <Btn onClick={() => guardar(false)} disabled={guardando} bg={C.surface2} fg={C.text} style={{ border: `1px solid ${C.line}` }}><Save size={15} /> {guardando ? "Guardando…" : "Guardar borrador"}</Btn>
               <Btn onClick={() => guardar(true)} disabled={guardando}><Send size={15} /> {guardando ? "Guardando…" : "Guardar y enviar"}</Btn>
@@ -454,6 +541,7 @@ function SolicitudDetalle({ sol, session, onClose }) {
   const [hdr, setHdr] = useState({ proveedor: sol.proveedor || "", fechaRequerida: sol.fechaRequerida || "", observaciones: sol.observaciones || "" });
   const [msg, setMsg] = useState("");
   const por = { pin: session.pin, nombre: session.nombre };
+  const esImg = (sol.archivo?.tipo || "").startsWith("image/");
 
   const guardarCambios = async () => {
     const validos = items.filter((it) => it.producto.trim());
@@ -482,12 +570,15 @@ function SolicitudDetalle({ sol, session, onClose }) {
           <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>Solicitud #{sol.folio} <Badge estado={sol.estado} /></div>
           <button onClick={onClose} className="rounded-lg p-1.5" style={{ color: C.muted, cursor: "pointer" }}><X size={16} /></button>
         </div>
-        <div className="mb-3 text-xs" style={{ color: C.faint }}>Creada por {sol.creadoPor?.nombre} · {fechaHora(sol.creadoAt)}</div>
+        <div className="mb-3 text-xs" style={{ color: C.faint }}>Creada por {sol.creadoPor?.nombre} · {fechaHora(sol.creadoAt)}{sol.origen === "imagen" ? " · desde imagen (OCR)" : ""}</div>
 
         {sol.archivo?.data ? (
-          <button onClick={() => descargarArchivo(sol.archivo)} className="mb-3 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info, cursor: "pointer" }}>
-            <Download size={13} /> Descargar original ({sol.archivo.nombre})
-          </button>
+          <div className="mb-3 flex flex-col gap-2">
+            {esImg && <div className="overflow-hidden rounded-xl" style={{ border: `1px solid ${C.line}`, maxHeight: 220 }}><img src={`data:${sol.archivo.tipo};base64,${sol.archivo.data}`} alt="original" style={{ width: "100%", objectFit: "contain", maxHeight: 220 }} /></div>}
+            <button onClick={() => descargarArchivo(sol.archivo)} className="inline-flex w-fit items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info, cursor: "pointer" }}>
+              <Download size={13} /> Descargar original ({sol.archivo.nombre})
+            </button>
+          </div>
         ) : <div className="mb-3 text-xs" style={{ color: C.faint }}>Sin archivo original adjunto.</div>}
 
         {esBorrador ? (
