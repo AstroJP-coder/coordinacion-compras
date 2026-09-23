@@ -9,7 +9,7 @@ import {
   KeyRound, AlertTriangle, LogOut, Users, Trash2, ShoppingCart, ClipboardList,
   Truck, FileCheck2, Shield, PackageCheck, Upload, Download, Send, Plus, X, Save,
   FileSpreadsheet, FileText, Check, ChevronLeft, Paperclip, Search, Image as ImageIcon, ScanLine,
-  CalendarClock, Hash, Clock, Building2, Inbox,
+  CalendarClock, Hash, Clock, Building2, Inbox, History, User,
 } from "lucide-react";
 
 /* ============ Firestore refs (colecciones aisladas compras_) ============ */
@@ -38,6 +38,7 @@ const ESTADOS = {
   ENVIADA: { l: "Enviada", c: C.info },
   OC_GENERADA: { l: "OC generada", c: C.amber },
   PENDIENTE_RECEPCION: { l: "Pend. recepción", c: C.gold },
+  RECEPCION_PARCIAL: { l: "Recep. parcial", c: C.clay },
   RECEPCIONADA: { l: "Recepcionada", c: C.teal },
   CERRADA: { l: "Cerrada", c: C.muted },
 };
@@ -233,8 +234,8 @@ function SetupAdmin({ onDone }) {
   );
 }
 
-/* ============ ADMIN ============ */
-function AdminView({ miPin }) {
+/* ============ ADMIN · usuarios ============ */
+function AdminUsuarios({ miPin }) {
   const [usuarios, setUsuarios] = useState([]);
   const [pin, setPin] = useState(""); const [nombre, setNombre] = useState(""); const [rol, setRol] = useState("analista_compras"); const [err, setErr] = useState("");
   useEffect(() => onSnapshot(colUsr, (s) => setUsuarios(s.docs.map((d) => ({ pin: d.id, ...d.data() })))), []);
@@ -791,7 +792,7 @@ function AdministrativoView({ session }) {
   useEffect(() => onSnapshot(colSol, (s) => setSols(s.docs.map((d) => ({ id: d.id, ...d.data() })))), []);
 
   const pendientes = useMemo(() => sols.filter((s) => s.estado === "ENVIADA").sort((a, b) => ms(a.creadoAt) - ms(b.creadoAt)), [sols]);
-  const programadas = useMemo(() => sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" || s.estado === "OC_GENERADA").sort((a, b) => ms(a.recepcionProgramada?.at) - ms(b.recepcionProgramada?.at)), [sols]);
+  const programadas = useMemo(() => sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" || s.estado === "OC_GENERADA" || s.estado === "RECEPCION_PARCIAL").sort((a, b) => ms(a.recepcionProgramada?.at) - ms(b.recepcionProgramada?.at)), [sols]);
   const filtrar = (arr) => arr.filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q))));
   const lista = tab === "pendientes" ? filtrar(pendientes) : filtrar(programadas);
 
@@ -842,23 +843,32 @@ const fechaAgenda = (at) => {
 };
 
 function RecepcionModal({ sol, session, onClose }) {
-  const [confirmando, setConfirmando] = useState(false);
+  const [obs, setObs] = useState("");
+  const [accion, setAccion] = useState(null); // null | "parcial" | "completa"
   const [guardando, setGuardando] = useState(false);
   const [err, setErr] = useState("");
   const at = sol.recepcionProgramada?.at;
+  const parcialPrevia = sol.estado === "RECEPCION_PARCIAL" ? sol.recepcion : null;
 
-  const recepcionar = async () => {
+  const ejecutar = async () => {
     setGuardando(true); setErr("");
     try {
       const por = { pin: session.pin, nombre: session.nombre };
+      const tipo = accion; // "parcial" | "completa"
+      const estado = tipo === "completa" ? "RECEPCIONADA" : "RECEPCION_PARCIAL";
+      const nota = obs.trim();
+      const evento = { accion: tipo === "completa" ? "recepcionada" : "recepcion_parcial", por, at: Date.now(), ...(nota ? { detalle: nota } : {}) };
       await updateDoc(doc(colSol, sol.id), {
-        estado: "RECEPCIONADA",
-        recepcion: { at: Date.now(), por },
-        historial: arrayUnion({ accion: "recepcionada", por, at: Date.now() }),
+        estado,
+        recepcion: { at: Date.now(), por, tipo, observaciones: nota },
+        historial: arrayUnion(evento),
       });
       onClose();
     } catch (e) { setGuardando(false); setErr("No se pudo confirmar: " + (e?.message || e)); }
   };
+
+  const labelAccion = accion === "completa" ? "completa" : "parcial";
+  const colorAccion = accion === "completa" ? C.teal : C.clay;
 
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-3" style={{ background: "#000000aa" }}>
@@ -877,19 +887,36 @@ function RecepcionModal({ sol, session, onClose }) {
             <CalendarClock size={16} color={C.faint} />
             <div><div className="text-xs" style={{ color: C.faint }}>Fecha / hora programada</div><div className="text-sm font-semibold" style={{ color: C.text }}>{at ? fechaAgenda(at) : "—"}</div></div>
           </div>
+
+          {parcialPrevia && (
+            <div className="rounded-xl px-3 py-2.5" style={{ background: C.clay + "14", border: `1px solid ${C.clay}44` }}>
+              <div className="flex items-center gap-1.5 text-xs font-semibold" style={{ color: C.clay }}><PackageCheck size={13} /> Recepción parcial previa</div>
+              <div className="mt-1 text-xs" style={{ color: C.muted }}>{parcialPrevia.por?.nombre} · {fechaHora(parcialPrevia.at)}{parcialPrevia.observaciones ? ` · ${parcialPrevia.observaciones}` : ""}</div>
+            </div>
+          )}
+
+          {/* Tarjeta de observaciones */}
+          <div className="rounded-xl p-3" style={{ background: C.surface2, border: `1px solid ${C.line}` }}>
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold" style={{ color: C.text }}><FileText size={13} color={C.gold} /> Observaciones (opcional)</div>
+            <textarea value={obs} onChange={(e) => setObs(e.target.value)} rows={3} placeholder="Anota lo que corresponda: faltantes, diferencias, estado de la mercadería, etc." className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text }} />
+          </div>
+
           <div className="text-xs" style={{ color: C.faint }}>La OC se verifica en el ERP. Aquí solo confirmas la recepción.</div>
         </div>
 
         {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
 
-        {!confirmando ? (
-          <div className="mt-5"><Btn full onClick={() => setConfirmando(true)}><PackageCheck size={18} /> RECEPCIONADO</Btn></div>
+        {!accion ? (
+          <div className="mt-5 flex gap-2">
+            <Btn full onClick={() => setAccion("parcial")} bg={C.clay} fg="#1a0f0b"><PackageCheck size={16} /> Parcial</Btn>
+            <Btn full onClick={() => setAccion("completa")} bg={C.teal} fg="#0d1a12"><PackageCheck size={16} /> Completa</Btn>
+          </div>
         ) : (
-          <div className="mt-5 rounded-xl p-3" style={{ background: C.teal + "14", border: `1px solid ${C.teal}55` }}>
-            <div className="mb-3 text-center text-sm font-semibold" style={{ color: C.text }}>¿Confirmar recepción de la OC {sol.ocNumero}?</div>
+          <div className="mt-5 rounded-xl p-3" style={{ background: colorAccion + "14", border: `1px solid ${colorAccion}55` }}>
+            <div className="mb-3 text-center text-sm font-semibold" style={{ color: C.text }}>¿Confirmar recepción {labelAccion} de la OC {sol.ocNumero}?</div>
             <div className="flex gap-2">
-              <Btn full onClick={() => setConfirmando(false)} bg={C.surface2} fg={C.text} style={{ border: `1px solid ${C.line}` }}>Cancelar</Btn>
-              <Btn full onClick={recepcionar} disabled={guardando} bg={C.teal} fg="#0d1a12"><Check size={16} /> {guardando ? "Guardando…" : "Confirmar"}</Btn>
+              <Btn full onClick={() => setAccion(null)} bg={C.surface2} fg={C.text} style={{ border: `1px solid ${C.line}` }}>Cancelar</Btn>
+              <Btn full onClick={ejecutar} disabled={guardando} bg={colorAccion} fg={accion === "completa" ? "#0d1a12" : "#1a0f0b"}><Check size={16} /> {guardando ? "Guardando…" : "Confirmar"}</Btn>
             </div>
           </div>
         )}
@@ -908,7 +935,7 @@ function BodegaView({ session }) {
   const ini = hoy0.getTime(); const fin = ini + 86400000;
 
   const grupos = useMemo(() => {
-    const pend = sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" && s.recepcionProgramada?.at)
+    const pend = sols.filter((s) => (s.estado === "PENDIENTE_RECEPCION" || s.estado === "RECEPCION_PARCIAL") && s.recepcionProgramada?.at)
       .sort((a, b) => a.recepcionProgramada.at - b.recepcionProgramada.at);
     return {
       atrasadas: pend.filter((s) => s.recepcionProgramada.at < ini),
@@ -922,7 +949,7 @@ function BodegaView({ session }) {
     <button onClick={() => setAbierta(s)} className="w-full text-left" style={{ cursor: "pointer" }}>
       <div className="flex items-center justify-between gap-3 rounded-xl px-4 py-3" style={{ background: C.surface, border: `1px solid ${C.line}`, borderLeft: `4px solid ${color}` }}>
         <div>
-          <div className="flex items-center gap-2 text-sm font-bold" style={{ color: C.text }}><Hash size={14} color={color} />OC {s.ocNumero || "—"}</div>
+          <div className="flex items-center gap-2 text-sm font-bold" style={{ color: C.text }}><Hash size={14} color={color} />OC {s.ocNumero || "—"}{s.estado === "RECEPCION_PARCIAL" && <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: C.clay + "22", color: C.clay }}>Parcial</span>}</div>
           <div className="mt-0.5 text-xs" style={{ color: C.muted }}>{s.proveedor || "—"} · {fechaAgenda(s.recepcionProgramada.at)}</div>
         </div>
         <div className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold" style={{ background: color + "1c", color }}><PackageCheck size={13} /> Recepcionar</div>
@@ -951,6 +978,138 @@ function BodegaView({ session }) {
       <Seccion titulo="PRÓXIMAS" Icono={CalendarClock} color={C.info} items={grupos.proximas} />
       {recepHoy > 0 && <div className="flex items-center gap-1.5 text-xs" style={{ color: C.teal }}><PackageCheck size={13} /> {recepHoy} recepcionada(s) hoy</div>}
       {abierta && <RecepcionModal sol={sols.find((s) => s.id === abierta.id) || abierta} session={session} onClose={() => setAbierta(null)} />}
+    </div>
+  );
+}
+
+/* ============ TRAZABILIDAD · línea de tiempo de una solicitud ============ */
+const ACCIONES = {
+  creada: { l: "Solicitud creada", i: ClipboardList, c: C.info },
+  editada: { l: "Solicitud editada", i: FileText, c: C.muted },
+  enviada: { l: "Enviada al administrativo", i: Send, c: C.info },
+  oc_registrada: { l: "OC registrada · recepción programada", i: FileCheck2, c: C.amber },
+  reprogramada: { l: "Recepción reprogramada", i: CalendarClock, c: C.amber },
+  recepcion_parcial: { l: "Recepción parcial", i: PackageCheck, c: C.clay },
+  recepcionada: { l: "Recepción confirmada", i: PackageCheck, c: C.teal },
+};
+
+function TrazaDetalle({ sol, onClose }) {
+  const eventos = [...(sol.historial || [])].sort((a, b) => ms(a.at) - ms(b.at));
+  const esImg = (sol.archivo?.tipo || "").startsWith("image/");
+  const Dato = ({ icon: I, label, valor }) => (
+    <div className="flex items-start gap-2">
+      <I size={14} color={C.faint} style={{ marginTop: 2 }} />
+      <div><div className="text-xs" style={{ color: C.faint }}>{label}</div><div className="text-sm" style={{ color: C.text }}>{valor || "—"}</div></div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-3" style={{ background: "#000000aa" }}>
+      <div className="mt-6 w-full max-w-3xl rounded-2xl p-4" style={{ background: C.surface, border: `1px solid ${C.line}` }}>
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>Trazabilidad · Solicitud #{sol.folio} <Badge estado={sol.estado} /></div>
+          <button onClick={onClose} className="rounded-lg p-1.5" style={{ color: C.muted, cursor: "pointer" }}><X size={16} /></button>
+        </div>
+
+        {/* Resumen reconstruido */}
+        <div className="mb-4 grid grid-cols-1 gap-3 rounded-xl p-3 sm:grid-cols-2" style={{ background: C.surface2 }}>
+          <Dato icon={User} label="Analista (creó)" valor={sol.creadoPor?.nombre} />
+          <Dato icon={Paperclip} label="Archivo original" valor={sol.archivo ? sol.archivo.nombre : (sol.origen === "imagen" ? "imagen (no adjuntada)" : "sin archivo")} />
+          <Dato icon={Building2} label="Proveedor" valor={sol.proveedor} />
+          <Dato icon={Hash} label="N° OC (ERP)" valor={sol.ocNumero} />
+          <Dato icon={CalendarClock} label="Recepción programada" valor={sol.recepcionProgramada?.at ? fechaAgenda(sol.recepcionProgramada.at) : ""} />
+          <Dato icon={PackageCheck} label="Recepción real" valor={sol.recepcion?.at ? `${fechaHora(sol.recepcion.at)} · ${sol.recepcion.por?.nombre || ""}${sol.recepcion.tipo === "parcial" ? " · parcial" : sol.recepcion.tipo === "completa" ? " · completa" : ""}${sol.recepcion.observaciones ? ` · ${sol.recepcion.observaciones}` : ""}` : ""} />
+        </div>
+
+        {sol.archivo?.data && (
+          <div className="mb-4 flex flex-col gap-2">
+            {esImg && <div className="overflow-hidden rounded-xl" style={{ border: `1px solid ${C.line}`, maxHeight: 180 }}><img src={`data:${sol.archivo.tipo};base64,${sol.archivo.data}`} alt="original" style={{ width: "100%", objectFit: "contain", maxHeight: 180 }} /></div>}
+            <button onClick={() => descargarArchivo(sol.archivo)} className="inline-flex w-fit items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium" style={{ background: C.info + "1c", color: C.info, cursor: "pointer" }}>
+              <Download size={13} /> Descargar original
+            </button>
+          </div>
+        )}
+
+        {/* Línea de tiempo */}
+        <div className="mb-2 flex items-center gap-2 text-sm font-semibold" style={{ color: C.gold }}><History size={15} /> Línea de tiempo</div>
+        <div className="flex flex-col">
+          {eventos.length === 0 && <div className="text-xs" style={{ color: C.faint }}>Sin eventos registrados.</div>}
+          {eventos.map((ev, i) => {
+            const a = ACCIONES[ev.accion] || { l: ev.accion, i: Clock, c: C.muted };
+            const I = a.i; const ultimo = i === eventos.length - 1;
+            return (
+              <div key={i} className="flex gap-3">
+                <div className="flex flex-col items-center">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full" style={{ background: a.c + "22", border: `1px solid ${a.c}66` }}><I size={14} color={a.c} /></div>
+                  {!ultimo && <div style={{ width: 2, flex: 1, background: C.line, minHeight: 14 }} />}
+                </div>
+                <div className="pb-4">
+                  <div className="text-sm font-medium" style={{ color: C.text }}>{a.l}</div>
+                  <div className="text-xs" style={{ color: C.faint }}>{ev.por?.nombre || "—"} · {fechaHora(ev.at)}{ev.detalle ? ` · ${ev.detalle}` : ""}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrazabilidadView() {
+  const [sols, setSols] = useState([]);
+  const [q, setQ] = useState("");
+  const [filtro, setFiltro] = useState("TODAS");
+  const [abierta, setAbierta] = useState(null);
+  useEffect(() => onSnapshot(colSol, (s) => setSols(s.docs.map((d) => ({ id: d.id, ...d.data() })))), []);
+
+  const lista = useMemo(() => sols
+    .filter((s) => filtro === "TODAS" || s.estado === filtro)
+    .filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || norm(s.creadoPor?.nombre).includes(norm(q)))
+    .sort((a, b) => ms(b.creadoAt) - ms(a.creadoAt)), [sols, filtro, q]);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="flex items-center gap-2 rounded-xl px-3 py-2 sm:col-span-2" style={{ background: C.surface, border: `1px solid ${C.line}` }}>
+          <Search size={15} color={C.faint} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar por folio, proveedor, OC o analista" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} />
+        </div>
+        <select value={filtro} onChange={(e) => setFiltro(e.target.value)} className="rounded-xl px-3 py-2 text-sm outline-none" style={{ background: C.surface, border: `1px solid ${C.line}`, color: C.text }}>
+          <option value="TODAS">Todos los estados</option>
+          {Object.keys(ESTADOS).map((k) => <option key={k} value={k}>{ESTADOS[k].l}</option>)}
+        </select>
+      </div>
+
+      {lista.length === 0 && <Card><div className="text-center text-sm" style={{ color: C.faint }}>No hay solicitudes que coincidan.</div></Card>}
+      {lista.map((s) => (
+        <button key={s.id} onClick={() => setAbierta(s)} className="text-left" style={{ cursor: "pointer" }}>
+          <Card>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>#{s.folio} <Badge estado={s.estado} /></div>
+                <div className="mt-0.5 text-xs" style={{ color: C.faint }}>
+                  {s.creadoPor?.nombre}{s.proveedor ? ` · ${s.proveedor}` : ""}{s.ocNumero ? ` · OC ${s.ocNumero}` : ""} · {(s.historial || []).length} evento(s)
+                </div>
+              </div>
+              <History size={16} color={C.faint} />
+            </div>
+          </Card>
+        </button>
+      ))}
+      {abierta && <TrazaDetalle sol={sols.find((s) => s.id === abierta.id) || abierta} onClose={() => setAbierta(null)} />}
+    </div>
+  );
+}
+
+/* ============ ADMIN (pestañas: usuarios + trazabilidad) ============ */
+function AdminView({ miPin }) {
+  const [tab, setTab] = useState("usuarios");
+  return (
+    <div>
+      <Tabs value={tab} onChange={setTab} items={[["usuarios", "Usuarios", Users], ["traza", "Trazabilidad", History]]} />
+      {tab === "usuarios" && <AdminUsuarios miPin={miPin} />}
+      {tab === "traza" && <TrazabilidadView />}
     </div>
   );
 }
