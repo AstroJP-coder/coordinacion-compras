@@ -549,7 +549,9 @@ function NuevaSolicitud({ session, onListo }) {
           </div>
           <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Proveedor (opcional, cabecera)" value={hdr.proveedor} onChange={(e) => setHdr({ ...hdr, proveedor: e.target.value })} placeholder="Si aplica a toda la solicitud" />
-            <Field label="Fecha requerida (opcional)" value={hdr.fechaRequerida} onChange={(e) => setHdr({ ...hdr, fechaRequerida: e.target.value })} placeholder="AAAA-MM-DD" />
+            <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Fecha requerida (opcional)
+              <input type="date" value={hdr.fechaRequerida} onChange={(e) => setHdr({ ...hdr, fechaRequerida: e.target.value })} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.surface2, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+            </label>
             <Field label="Observaciones (opcional)" value={hdr.observaciones} onChange={(e) => setHdr({ ...hdr, observaciones: e.target.value })} placeholder="Nota general" />
           </div>
           <ItemsEditor items={items} setItems={setItems} />
@@ -619,7 +621,9 @@ function SolicitudDetalle({ sol, session, onClose }) {
           <>
             <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <Field label="Proveedor (cabecera)" value={hdr.proveedor} onChange={(e) => setHdr({ ...hdr, proveedor: e.target.value })} />
-              <Field label="Fecha requerida" value={hdr.fechaRequerida} onChange={(e) => setHdr({ ...hdr, fechaRequerida: e.target.value })} />
+              <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Fecha requerida
+                <input type="date" value={hdr.fechaRequerida} onChange={(e) => setHdr({ ...hdr, fechaRequerida: e.target.value })} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.surface2, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+              </label>
               <Field label="Observaciones" value={hdr.observaciones} onChange={(e) => setHdr({ ...hdr, observaciones: e.target.value })} />
             </div>
             <ItemsEditor items={items} setItems={setItems} />
