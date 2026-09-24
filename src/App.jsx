@@ -88,16 +88,49 @@ const comprimirImagen = (file, maxBytes = MAX_ARCHIVO) => new Promise((resolve) 
   img.src = url;
 });
 
-const ITEM_VACIO = { producto: "", cantidad: "", unidad: "", proveedor: "", fechaRequerida: "", observaciones: "" };
+const ITEM_VACIO = { codigo: "", producto: "", cantidad: "", unidad: "", costo: "", proveedor: "", fechaRequerida: "", observaciones: "" };
 const FIELD_DEFS = [
+  { k: "codigo", l: "Código ERP", syn: ["codigo erp", "cod erp", "codigo producto", "codigo articulo", "codigo", "cod", "sku", "id producto", "code"] },
   { k: "producto", l: "Producto / Descripción", syn: ["producto", "descripcion", "detalle", "item", "articulo", "glosa", "nombre"] },
-  { k: "cantidad", l: "Cantidad", syn: ["cantidad", "cant", "qty", "unidades"] },
+  { k: "cantidad", l: "Cantidad", syn: ["cantidad", "cant", "qty", "unidades", "pedido"] },
   { k: "unidad", l: "Unidad", syn: ["unidad", "um", "unidad de medida", "medida", "unit"] },
+  { k: "costo", l: "Costo unitario", syn: ["costo unitario", "costo uni", "costo unit", "costo", "precio unitario", "precio uni", "precio", "valor unitario", "valor", "costo neto", "p unit", "precio unit"] },
   { k: "proveedor", l: "Proveedor", syn: ["proveedor", "prov", "vendor"] },
   { k: "fechaRequerida", l: "Fecha requerida", syn: ["fecha requerida", "fecha_requerida", "fecha", "requerida", "fecha entrega", "plazo"] },
   { k: "observaciones", l: "Observaciones", syn: ["observaciones", "observacion", "obs", "nota", "notas", "comentario", "comentarios"] },
 ];
-const COLS = FIELD_DEFS.map((f) => f.k);
+// columnas de la tabla de ítems (orden + ancho + etiqueta corta)
+const COLMETA = [
+  { k: "codigo", l: "Cód. ERP", w: 100 },
+  { k: "producto", l: "Producto / Descripción", w: null },
+  { k: "cantidad", l: "Cantidad", w: 80 },
+  { k: "unidad", l: "Unidad", w: 90 },
+  { k: "costo", l: "Costo unit.", w: 100 },
+  { k: "proveedor", l: "Proveedor", w: 130 },
+  { k: "fechaRequerida", l: "Fecha req.", w: 110 },
+  { k: "observaciones", l: "Observaciones", w: null },
+];
+// Parseo tolerante de montos/cantidades: "$1,716", "1.716", "1.716,50", "0,6" → número
+const parseMonto = (v) => {
+  let s = String(v ?? "").replace(/[^\d.,-]/g, "").trim();
+  if (!s) return 0;
+  const tienePunto = s.includes("."), tieneComa = s.includes(",");
+  if (tienePunto && tieneComa) {
+    // el último separador es el decimal
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (tieneComa) {
+    const dec = s.split(",").pop();
+    s = dec.length === 2 ? s.replace(",", ".") : s.replace(/,/g, ""); // ",XX" = decimal; si no, miles
+  } else if (tienePunto) {
+    const dec = s.split(".").pop();
+    if (dec.length === 3 && s.split(".").length === 2 && s.replace(".", "").length > 3) s = s.replace(/\./g, ""); // "1.716" = miles
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+};
+const totalItems = (items) => (items || []).reduce((a, it) => a + parseMonto(it.cantidad) * parseMonto(it.costo), 0);
+const montoCLP = (n) => new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(n || 0);
 const guessField = (header) => {
   const h = norm(header);
   if (!h) return "ignorar";
@@ -286,18 +319,14 @@ function ItemsEditor({ items, setItems }) {
   const add = () => setItems([...items, { ...ITEM_VACIO }]);
   const th = { color: C.faint, fontWeight: 600 };
   const inp = { background: C.surface2, border: `1px solid ${C.line}`, color: C.text };
+  const total = totalItems(items);
   return (
     <div>
       <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${C.line}` }}>
-        <table className="w-full text-sm" style={{ minWidth: 720, borderCollapse: "collapse" }}>
+        <table className="w-full text-sm" style={{ minWidth: 920, borderCollapse: "collapse" }}>
           <thead><tr style={{ background: C.surface2 }}>
             <th className="px-2 py-2 text-left text-xs" style={{ ...th, width: 34 }}>#</th>
-            <th className="px-2 py-2 text-left text-xs" style={th}>Producto / Descripción</th>
-            <th className="px-2 py-2 text-left text-xs" style={{ ...th, width: 80 }}>Cantidad</th>
-            <th className="px-2 py-2 text-left text-xs" style={{ ...th, width: 90 }}>Unidad</th>
-            <th className="px-2 py-2 text-left text-xs" style={{ ...th, width: 140 }}>Proveedor</th>
-            <th className="px-2 py-2 text-left text-xs" style={{ ...th, width: 120 }}>Fecha req.</th>
-            <th className="px-2 py-2 text-left text-xs" style={th}>Observaciones</th>
+            {COLMETA.map((c) => <th key={c.k} className="px-2 py-2 text-left text-xs" style={{ ...th, width: c.w || undefined }}>{c.l}</th>)}
             <th style={{ width: 34 }}></th>
           </tr></thead>
           <tbody>
@@ -306,24 +335,27 @@ function ItemsEditor({ items, setItems }) {
               return (
                 <tr key={i} style={{ borderTop: `1px solid ${C.line}` }}>
                   <td className="px-2 py-1 text-xs" style={{ color: vacio ? C.clay : C.faint }}>{i + 1}</td>
-                  {COLS.map((k) => (
-                    <td key={k} className="px-1 py-1">
-                      <input value={it[k]} onChange={(e) => upd(i, k, e.target.value)}
-                        className="w-full rounded-md px-2 py-1 text-sm outline-none" style={{ ...inp, borderColor: k === "producto" && vacio ? C.clay : C.line }}
-                        inputMode={k === "cantidad" ? "decimal" : undefined} />
+                  {COLMETA.map((c) => (
+                    <td key={c.k} className="px-1 py-1">
+                      <input value={it[c.k] || ""} onChange={(e) => upd(i, c.k, e.target.value)}
+                        className="w-full rounded-md px-2 py-1 text-sm outline-none" style={{ ...inp, borderColor: c.k === "producto" && vacio ? C.clay : C.line }}
+                        inputMode={c.k === "cantidad" || c.k === "costo" ? "decimal" : undefined} />
                     </td>
                   ))}
                   <td className="px-1"><button onClick={() => del(i)} className="rounded-md p-1" style={{ color: C.clay, cursor: "pointer" }}><X size={14} /></button></td>
                 </tr>
               );
             })}
-            {items.length === 0 && <tr><td colSpan={8} className="px-3 py-4 text-center text-xs" style={{ color: C.faint }}>Sin ítems.</td></tr>}
+            {items.length === 0 && <tr><td colSpan={COLMETA.length + 2} className="px-3 py-4 text-center text-xs" style={{ color: C.faint }}>Sin ítems.</td></tr>}
           </tbody>
         </table>
       </div>
       <div className="mt-2 flex items-center justify-between">
         <Ghost onClick={add} color={C.gold}><Plus size={13} /> Agregar fila</Ghost>
-        <span className="text-xs" style={{ color: C.faint }}>{items.filter((it) => it.producto.trim()).length} ítem(s) válido(s)</span>
+        <div className="flex items-center gap-3 text-xs">
+          <span style={{ color: C.faint }}>{items.filter((it) => it.producto.trim()).length} ítem(s)</span>
+          {total > 0 && <span className="font-semibold" style={{ color: C.gold }}>Total estimado: {montoCLP(total)}</span>}
+        </div>
       </div>
     </div>
   );
@@ -601,22 +633,7 @@ function SolicitudDetalle({ sol, session, onClose }) {
             </div>
           </>
         ) : (
-          <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${C.line}` }}>
-            <table className="w-full text-sm" style={{ minWidth: 640 }}>
-              <thead><tr style={{ background: C.surface2, color: C.faint }}>
-                <th className="px-2 py-2 text-left text-xs">Producto</th><th className="px-2 py-2 text-left text-xs">Cant.</th>
-                <th className="px-2 py-2 text-left text-xs">Unidad</th><th className="px-2 py-2 text-left text-xs">Proveedor</th>
-                <th className="px-2 py-2 text-left text-xs">Fecha req.</th><th className="px-2 py-2 text-left text-xs">Obs.</th>
-              </tr></thead>
-              <tbody>{(sol.items || []).map((it, i) => (
-                <tr key={i} style={{ borderTop: `1px solid ${C.line}` }}>
-                  <td className="px-2 py-1.5" style={{ color: C.text }}>{it.producto}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.cantidad}</td>
-                  <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.unidad}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.proveedor}</td>
-                  <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.fechaRequerida}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.observaciones}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
+          <ItemsTabla items={sol.items} />
         )}
       </div>
     </div>
@@ -633,7 +650,7 @@ function AnalistaView({ session }) {
 
   const mias = useMemo(() => sols
     .filter((s) => s.creadoPor?.pin === session.pin)
-    .filter((s) => !q.trim() || String(s.folio).includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q))) || norm(s.proveedor).includes(norm(q)))
+    .filter((s) => !q.trim() || String(s.folio).includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q)) || norm(it.codigo).includes(norm(q))) || norm(s.proveedor).includes(norm(q)))
     .sort((a, b) => ms(b.creadoAt) - ms(a.creadoAt)), [sols, session.pin, q]);
   const stats = useMemo(() => {
     const m = sols.filter((s) => s.creadoPor?.pin === session.pin);
@@ -683,22 +700,24 @@ function AnalistaView({ session }) {
 
 /* ============ tabla de ítems (solo lectura) ============ */
 function ItemsTabla({ items }) {
+  const total = totalItems(items);
   return (
-    <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${C.line}` }}>
-      <table className="w-full text-sm" style={{ minWidth: 640 }}>
-        <thead><tr style={{ background: C.surface2, color: C.faint }}>
-          <th className="px-2 py-2 text-left text-xs">Producto</th><th className="px-2 py-2 text-left text-xs">Cant.</th>
-          <th className="px-2 py-2 text-left text-xs">Unidad</th><th className="px-2 py-2 text-left text-xs">Proveedor</th>
-          <th className="px-2 py-2 text-left text-xs">Fecha req.</th><th className="px-2 py-2 text-left text-xs">Obs.</th>
-        </tr></thead>
-        <tbody>{(items || []).map((it, i) => (
-          <tr key={i} style={{ borderTop: `1px solid ${C.line}` }}>
-            <td className="px-2 py-1.5" style={{ color: C.text }}>{it.producto}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.cantidad}</td>
-            <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.unidad}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.proveedor}</td>
-            <td className="px-2 py-1.5" style={{ color: C.muted }}>{it.fechaRequerida}</td><td className="px-2 py-1.5" style={{ color: C.muted }}>{it.observaciones}</td>
-          </tr>
-        ))}</tbody>
-      </table>
+    <div>
+      <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${C.line}` }}>
+        <table className="w-full text-sm" style={{ minWidth: 720 }}>
+          <thead><tr style={{ background: C.surface2, color: C.faint }}>
+            {COLMETA.map((c) => <th key={c.k} className="px-2 py-2 text-left text-xs">{c.l}</th>)}
+          </tr></thead>
+          <tbody>{(items || []).map((it, i) => (
+            <tr key={i} style={{ borderTop: `1px solid ${C.line}` }}>
+              {COLMETA.map((c) => (
+                <td key={c.k} className="px-2 py-1.5" style={{ color: c.k === "producto" ? C.text : C.muted }}>{it[c.k] || ""}</td>
+              ))}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {total > 0 && <div className="mt-2 text-right text-xs font-semibold" style={{ color: C.gold }}>Total estimado: {montoCLP(total)}</div>}
     </div>
   );
 }
@@ -793,7 +812,7 @@ function AdministrativoView({ session }) {
 
   const pendientes = useMemo(() => sols.filter((s) => s.estado === "ENVIADA").sort((a, b) => ms(a.creadoAt) - ms(b.creadoAt)), [sols]);
   const programadas = useMemo(() => sols.filter((s) => s.estado === "PENDIENTE_RECEPCION" || s.estado === "OC_GENERADA" || s.estado === "RECEPCION_PARCIAL").sort((a, b) => ms(a.recepcionProgramada?.at) - ms(b.recepcionProgramada?.at)), [sols]);
-  const filtrar = (arr) => arr.filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q))));
+  const filtrar = (arr) => arr.filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || (s.items || []).some((it) => norm(it.producto).includes(norm(q)) || norm(it.codigo).includes(norm(q))));
   const lista = tab === "pendientes" ? filtrar(pendientes) : filtrar(programadas);
 
   return (
@@ -1017,6 +1036,7 @@ function TrazaDetalle({ sol, onClose }) {
           <Dato icon={Paperclip} label="Archivo original" valor={sol.archivo ? sol.archivo.nombre : (sol.origen === "imagen" ? "imagen (no adjuntada)" : "sin archivo")} />
           <Dato icon={Building2} label="Proveedor" valor={sol.proveedor} />
           <Dato icon={Hash} label="N° OC (ERP)" valor={sol.ocNumero} />
+          <Dato icon={ShoppingCart} label="Total estimado" valor={totalItems(sol.items) > 0 ? montoCLP(totalItems(sol.items)) : ""} />
           <Dato icon={CalendarClock} label="Recepción programada" valor={sol.recepcionProgramada?.at ? fechaAgenda(sol.recepcionProgramada.at) : ""} />
           <Dato icon={PackageCheck} label="Recepción real" valor={sol.recepcion?.at ? `${fechaHora(sol.recepcion.at)} · ${sol.recepcion.por?.nombre || ""}${sol.recepcion.tipo === "parcial" ? " · parcial" : sol.recepcion.tipo === "completa" ? " · completa" : ""}${sol.recepcion.observaciones ? ` · ${sol.recepcion.observaciones}` : ""}` : ""} />
         </div>
@@ -1065,7 +1085,7 @@ function TrazabilidadView() {
 
   const lista = useMemo(() => sols
     .filter((s) => filtro === "TODAS" || s.estado === filtro)
-    .filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || norm(s.creadoPor?.nombre).includes(norm(q)))
+    .filter((s) => !q.trim() || String(s.folio).includes(q) || norm(s.proveedor).includes(norm(q)) || String(s.ocNumero || "").includes(q) || norm(s.creadoPor?.nombre).includes(norm(q)) || (s.items || []).some((it) => norm(it.codigo).includes(norm(q))))
     .sort((a, b) => ms(b.creadoAt) - ms(a.creadoAt)), [sols, filtro, q]);
 
   return (
