@@ -371,7 +371,8 @@ function plantilla() {
   XLSX.writeFile(wb, "plantilla_solicitud_compras.xlsx");
 }
 
-function NuevaSolicitud({ session, onListo }) {
+function NuevaSolicitud({ session, onListo, modo = "analista" }) {
+  const esAdmin = modo === "administrativo";
   const [step, setStep] = useState("upload"); // upload | map | ocr | review
   const [origen, setOrigen] = useState("archivo"); // archivo | imagen
   const [file, setFile] = useState(null);
@@ -379,6 +380,8 @@ function NuevaSolicitud({ session, onListo }) {
   const [mapping, setMapping] = useState([]);
   const [items, setItems] = useState([]);
   const [hdr, setHdr] = useState({ proveedor: "", fechaRequerida: "", observaciones: "" });
+  // generación autónoma de OC por el administrativo (excepciones / subrogancias)
+  const [oc, setOc] = useState({ numero: "", fecha: "", hora: "", tipo: "subrogancia", nota: "" });
   const [err, setErr] = useState(""); const [aviso, setAviso] = useState(""); const [guardando, setGuardando] = useState(false);
   // imagen / OCR
   const [imgPrev, setImgPrev] = useState("");       // objectURL para vista previa
@@ -468,6 +471,55 @@ function NuevaSolicitud({ session, onListo }) {
     } catch (e) { setGuardando(false); setErr("No se pudo guardar: " + (e?.message || e)); }
   };
 
+  // Generación autónoma de OC por el administrativo (excepciones / subrogancias):
+  // crea la solicitud y la deja directo en PENDIENTE_RECEPCION, marcada y trazada.
+  const guardarOC = async () => {
+    const validos = items.filter((it) => it.producto.trim());
+    if (!validos.length) return setErr("Necesitas al menos un ítem con producto.");
+    if (!oc.numero.trim()) return setErr("Ingresa el N° de OC generado en el ERP.");
+    if (!hdr.proveedor.trim()) return setErr("Ingresa el proveedor (aparece en la agenda de bodega).");
+    if (!oc.fecha) return setErr("Selecciona la fecha de recepción.");
+    if (!oc.hora) return setErr("Selecciona la hora de recepción.");
+    const at = new Date(`${oc.fecha}T${oc.hora}`).getTime();
+    if (!at || isNaN(at)) return setErr("Fecha u hora de recepción inválida.");
+    setGuardando(true); setErr(""); setAviso("");
+    try {
+      let archivo = null, archivoOmitido = false;
+      if (origen === "imagen") {
+        if (imgEmbed && !imgEmbed.tooBig) archivo = { nombre: imgEmbed.nombre, tipo: imgEmbed.tipo, size: imgEmbed.size, data: imgEmbed.data };
+        else archivoOmitido = true;
+      } else if (file && !archivoGrande) {
+        try { archivo = { nombre: file.name, tipo: file.type || "", size: file.size, data: await fileToB64(file) }; }
+        catch (e) { archivoOmitido = true; }
+      } else if (archivoGrande) archivoOmitido = true;
+
+      const snap = await getDocs(colSol);
+      const folio = snap.docs.reduce((mx, d) => Math.max(mx, Number(d.data().folio) || 0), 0) + 1;
+      const por = { pin: session.pin, nombre: session.nombre };
+      const tipoTxt = oc.tipo === "excepcion" ? "Excepción" : "Subrogancia";
+      const motivo = oc.nota.trim() ? `${tipoTxt}: ${oc.nota.trim()}` : tipoTxt;
+      const historial = [
+        { accion: "creada", por, at: Date.now(), detalle: `OC autónoma (${motivo})` },
+        { accion: "oc_registrada", por, at: Date.now(), detalle: `OC ${oc.numero.trim()} · recepción ${oc.fecha} ${oc.hora} · ${motivo}` },
+      ];
+      const base = {
+        folio, estado: "PENDIENTE_RECEPCION",
+        items: validos.map((it) => ({ ...it, cantidad: String(it.cantidad).trim() })),
+        proveedor: hdr.proveedor.trim(), fechaRequerida: hdr.fechaRequerida.trim(), observaciones: hdr.observaciones.trim(),
+        origen, ocNumero: oc.numero.trim(),
+        recepcionProgramada: { fecha: oc.fecha, hora: oc.hora, at }, recepcion: null,
+        generadaPor: "administrativo", motivoExcepcion: motivo,
+        creadoPor: por, creadoAt: serverTimestamp(), historial,
+      };
+      const nueva = doc(colSol);
+      try { await setDoc(nueva, { ...base, archivo }); }
+      catch (e2) { if (archivo) { await setDoc(nueva, { ...base, archivo: null }); archivoOmitido = true; } else throw e2; }
+
+      if (archivoOmitido) { setAviso("OC generada. El original no se adjuntó por tamaño; los ítems y la OC quedaron guardados."); setGuardando(false); setTimeout(() => onListo(), 2200); }
+      else onListo();
+    } catch (e) { setGuardando(false); setErr("No se pudo generar la OC: " + (e?.message || e)); }
+  };
+
   return (
     <Card>
       {step === "upload" && (
@@ -555,13 +607,43 @@ function NuevaSolicitud({ session, onListo }) {
             <Field label="Observaciones (opcional)" value={hdr.observaciones} onChange={(e) => setHdr({ ...hdr, observaciones: e.target.value })} placeholder="Nota general" />
           </div>
           <ItemsEditor items={items} setItems={setItems} />
+
+          {esAdmin && (
+            <div className="mt-4 rounded-xl p-3" style={{ background: C.surface2, border: `1px solid ${C.gold}44` }}>
+              <div className="mb-1 flex items-center gap-2 text-sm font-semibold" style={{ color: C.gold }}><FileCheck2 size={15} /> Generar OC (excepción / subrogancia)</div>
+              <div className="mb-3 text-xs" style={{ color: C.faint }}>Como administrativo, puedes crear esta solicitud y registrar su OC directamente, sin pasar por el analista. Queda marcada y trazada con el motivo.</div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>N° de OC (del ERP)
+                  <div className="flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                    <Hash size={14} color={C.faint} /><input value={oc.numero} onChange={(e) => setOc({ ...oc, numero: e.target.value })} placeholder="Ej: 4587" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} /></div>
+                </label>
+                <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Motivo
+                  <select value={oc.tipo} onChange={(e) => setOc({ ...oc, tipo: e.target.value })} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text }}>
+                    <option value="subrogancia">Subrogancia (cubriendo al analista)</option>
+                    <option value="excepcion">Excepción</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Fecha de recepción
+                  <input type="date" value={oc.fecha} onChange={(e) => setOc({ ...oc, fecha: e.target.value })} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+                </label>
+                <label className="flex flex-col gap-1 text-xs" style={{ color: C.muted }}>Hora de recepción
+                  <input type="time" value={oc.hora} onChange={(e) => setOc({ ...oc, hora: e.target.value })} className="rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.text, colorScheme: "dark" }} />
+                </label>
+              </div>
+              <div className="mt-3"><Field label="Nota del motivo (opcional)" value={oc.nota} onChange={(e) => setOc({ ...oc, nota: e.target.value })} placeholder="Ej: analista con licencia; urgencia de evento" /></div>
+              <div className="mt-2 text-xs" style={{ color: C.faint }}>El proveedor se toma del campo “Proveedor (cabecera)” de arriba.</div>
+            </div>
+          )}
+
           {err && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.clay }}><AlertTriangle size={13} /> {err}</div>}
           {aviso && <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: C.amber }}><AlertTriangle size={13} /> {aviso}</div>}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
             <Ghost onClick={() => setStep(origen === "imagen" ? "ocr" : "map")}><ChevronLeft size={13} /> Volver</Ghost>
             <div className="flex gap-2">
               <Btn onClick={() => guardar(false)} disabled={guardando} bg={C.surface2} fg={C.text} style={{ border: `1px solid ${C.line}` }}><Save size={15} /> {guardando ? "Guardando…" : "Guardar borrador"}</Btn>
-              <Btn onClick={() => guardar(true)} disabled={guardando}><Send size={15} /> {guardando ? "Guardando…" : "Guardar y enviar"}</Btn>
+              {esAdmin
+                ? <Btn onClick={guardarOC} disabled={guardando}><FileCheck2 size={15} /> {guardando ? "Generando…" : "Generar OC y enviar a bodega"}</Btn>
+                : <Btn onClick={() => guardar(true)} disabled={guardando}><Send size={15} /> {guardando ? "Guardando…" : "Guardar y enviar"}</Btn>}
             </div>
           </div>
         </>
@@ -825,8 +907,11 @@ function AdministrativoView({ session }) {
         <span style={{ color: C.info }}>{pendientes.length} pendiente(s)</span>
         <span style={{ color: C.gold }}>{programadas.length} programada(s)</span>
       </div>
-      <Tabs value={tab} onChange={setTab} items={[["pendientes", "Pendientes", Inbox], ["programadas", "Programadas", CalendarClock]]} />
+      <Tabs value={tab} onChange={setTab} items={[["pendientes", "Pendientes", Inbox], ["programadas", "Programadas", CalendarClock], ["nueva", "Nueva OC", FileCheck2]]} />
 
+      {tab === "nueva" && <NuevaSolicitud session={session} modo="administrativo" onListo={() => setTab("programadas")} />}
+
+      {tab !== "nueva" && <>
       <div className="mb-3 flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: C.surface, border: `1px solid ${C.line}` }}>
         <Search size={15} color={C.faint} />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar por folio, producto, proveedor u OC" className="w-full bg-transparent text-sm outline-none" style={{ color: C.text }} />
@@ -845,6 +930,7 @@ function AdministrativoView({ session }) {
                     <div className="mt-0.5 text-xs" style={{ color: C.faint }}>
                       {nItems} ítem(s){s.proveedor ? ` · ${s.proveedor}` : ""} · de {s.creadoPor?.nombre}
                       {tab === "programadas" && s.recepcionProgramada?.at ? ` · recep. ${fechaHora(s.recepcionProgramada.at)} · OC ${s.ocNumero}` : ""}
+                      {s.generadaPor === "administrativo" ? " · OC autónoma" : ""}
                     </div>
                   </div>
                   <div className="text-xs" style={{ color: C.faint }}>{tab === "pendientes" ? "Procesar →" : "Editar →"}</div>
@@ -854,6 +940,7 @@ function AdministrativoView({ session }) {
           );
         })}
       </div>
+      </>}
       {abierta && <AdminDetalle sol={sols.find((s) => s.id === abierta.id) || abierta} session={session} onClose={() => setAbierta(null)} />}
     </div>
   );
@@ -1036,11 +1123,12 @@ function TrazaDetalle({ sol, onClose }) {
 
         {/* Resumen reconstruido */}
         <div className="mb-4 grid grid-cols-1 gap-3 rounded-xl p-3 sm:grid-cols-2" style={{ background: C.surface2 }}>
-          <Dato icon={User} label="Analista (creó)" valor={sol.creadoPor?.nombre} />
+          <Dato icon={User} label={sol.generadaPor === "administrativo" ? "Creada por (administrativo)" : "Analista (creó)"} valor={sol.creadoPor?.nombre} />
           <Dato icon={Paperclip} label="Archivo original" valor={sol.archivo ? sol.archivo.nombre : (sol.origen === "imagen" ? "imagen (no adjuntada)" : "sin archivo")} />
           <Dato icon={Building2} label="Proveedor" valor={sol.proveedor} />
           <Dato icon={Hash} label="N° OC (ERP)" valor={sol.ocNumero} />
           <Dato icon={ShoppingCart} label="Total estimado" valor={totalItems(sol.items) > 0 ? montoCLP(totalItems(sol.items)) : ""} />
+          {sol.generadaPor === "administrativo" && <Dato icon={FileCheck2} label="OC autónoma (motivo)" valor={sol.motivoExcepcion} />}
           <Dato icon={CalendarClock} label="Recepción programada" valor={sol.recepcionProgramada?.at ? fechaAgenda(sol.recepcionProgramada.at) : ""} />
           <Dato icon={PackageCheck} label="Recepción real" valor={sol.recepcion?.at ? `${fechaHora(sol.recepcion.at)} · ${sol.recepcion.por?.nombre || ""}${sol.recepcion.tipo === "parcial" ? " · parcial" : sol.recepcion.tipo === "completa" ? " · completa" : ""}${sol.recepcion.observaciones ? ` · ${sol.recepcion.observaciones}` : ""}` : ""} />
         </div>
