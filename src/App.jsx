@@ -655,6 +655,10 @@ function NuevaSolicitud({ session, onListo, modo = "analista" }) {
 /* ============ Detalle / edición de una solicitud ============ */
 function SolicitudDetalle({ sol, session, onClose }) {
   const esBorrador = sol.estado === "BORRADOR";
+  // Quien la emitió puede borrar una solicitud ENVIADA si se equivocó, mientras el administrativo
+  // todavía no registre la OC. Desde OC_GENERADA en adelante ya existe la OC en Runa: no se borra.
+  const esMia = sol.creadoPor?.pin === session.pin;
+  const puedeBorrarEnviada = sol.estado === "ENVIADA" && esMia;
   const [items, setItems] = useState(sol.items || []);
   const [hdr, setHdr] = useState({ proveedor: sol.proveedor || "", fechaRequerida: sol.fechaRequerida || "", observaciones: sol.observaciones || "" });
   const [msg, setMsg] = useState("");
@@ -679,6 +683,16 @@ function SolicitudDetalle({ sol, session, onClose }) {
   const eliminar = async () => {
     if (!window.confirm("¿Eliminar este borrador? No se puede deshacer.")) return;
     await deleteDoc(doc(colSol, sol.id)); onClose();
+  };
+  const eliminarEnviada = async () => {
+    if (!window.confirm(`¿Eliminar la solicitud #${sol.folio}? El administrativo dejará de verla. No se puede deshacer.`)) return;
+    try {
+      // Se vuelve a leer justo antes de borrar: si el administrativo ya registró la OC, no se borra.
+      const actual = await getDoc(doc(colSol, sol.id));
+      if (!actual.exists()) { onClose(); return; }
+      if (actual.data().estado !== "ENVIADA") { setMsg("El administrativo ya registró la OC de esta solicitud; ya no se puede eliminar. Pídele que la gestione."); return; }
+      await deleteDoc(doc(colSol, sol.id)); onClose();
+    } catch (e) { setMsg("No se pudo eliminar: " + (e?.message || e)); }
   };
 
   return (
@@ -719,7 +733,16 @@ function SolicitudDetalle({ sol, session, onClose }) {
             </div>
           </>
         ) : (
-          <ItemsTabla items={sol.items} />
+          <>
+            <ItemsTabla items={sol.items} />
+            {msg && <div className="mt-3 text-xs" style={{ color: C.clay }}>{msg}</div>}
+            {puedeBorrarEnviada && (
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs" style={{ color: C.faint }}>¿La emitiste con errores? Puedes eliminarla mientras el administrativo no registre la OC.</div>
+                <Ghost onClick={eliminarEnviada} color={C.clay}><Trash2 size={13} /> Eliminar solicitud</Ghost>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
